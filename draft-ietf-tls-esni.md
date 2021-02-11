@@ -797,9 +797,8 @@ the extension syntactically and abort the connection with a "decode_error" alert
 if it is invalid. It otherwise ignores the extension and MUST NOT use the retry
 keys.
 
-[[OPEN ISSUE: if the client sends a GREASE "encrypted_client_hello" extension,
-should it also send a GREASE "pre_shared_key" extension? If not, GREASE+ticket
-is a trivial distinguisher.]]
+[[TODO: Provide a defense for the GREASE+resumption and GREASE+PSK
+differentiators pointed out by @kjacobs in issue #354.]]
 
 Offering a GREASE extension is not considered offering an encrypted ClientHello
 for purposes of requirements in {{client-behavior}}. In particular, the client
@@ -1044,10 +1043,10 @@ a compliant ECH application MUST implement the following HPKE cipher suite:
 ## Security and Privacy Goals {#goals}
 
 ECH considers two types of attackers: passive and active. Passive attackers can
-read packets from the network. They cannot perform any sort of active behavior
+read packets from the network, but they cannot perform any sort of active behavior
 such as probing servers or querying DNS. A middlebox that filters based on
 plaintext packet contents is one example of a passive attacker. In contrast,
-active attackers can write packets into the network for malicious purposes, such
+active attackers can also write packets into the network for malicious purposes, such
 as interfering with existing connections, probing servers, and querying DNS. In
 short, an active attacker corresponds to the conventional threat model for
 TLS 1.3 {{RFC8446}}.
@@ -1073,24 +1072,11 @@ supports some cipher suite, it may be possible to identify that host based on
 the contents of unencrypted handshake messages.
 
 Beyond these primary security and privacy goals, ECH also aims to hide, to some
-extent, (a) whether or not a specific server supports ECH and (b) whether or
-not ECH was accepted for a particular connection. ECH aims to achieve both
-properties, assuming the attacker is passive and does not know the set of ECH
-configurations offered by the client-facing server. It does not achieve these
-properties for active attackers. More specifically:
-
-- Passive attackers with a known ECH configuration can distinguish between a
-connection that negotiates ECH with that configuration and one which does not,
-because the latter used a GREASE "encrypted_client_hello" extension (as
-specified in {{grease-ech}}) or a different ECH configuration.
-- Passive attackers without the ECH configuration cannot distinguish between a
-connection that negotiates ECH and one which uses a GREASE
-"encrypted_client_hello" extension.
-- Active attackers can distinguish between a connection that negotiates ECH and
-one which uses a GREASE "encrypted_client_hello" extension.
-
-See {{dont-stick-out}} for more discussion about the "do not stick out"
-criteria from {{?RFC8744}}.
+extent, the fact that it is being used at all. Specifically, the GREASE ECH
+extension described in {{grease-ech}} does not change the security properties of
+the TLS handshake at all. Instead, its goal is merely to provide "cover" for the
+real ECH protocol ({{real-ech}}) as a means of addressing the "do not stick out"
+requirements of {{?RFC8744}}. See {{dont-stick-out}} for details.
 
 ## Unauthenticated and Plaintext DNS {#plaintext-dns}
 
@@ -1252,16 +1238,85 @@ TCP connections an attacker can open.
 
 ### Do Not Stick Out {#dont-stick-out}
 
-The only explicit signal indicating possible use of ECH is the ClientHello
-"encrypted_client_hello" extension. Server handshake messages do not contain any
-signal indicating use or negotiation of ECH. Clients MAY GREASE the
-"encrypted_client_hello" extension, as described in {{grease-ech}}, which helps
-ensure the ecosystem handles ECH correctly. Moreover, as more clients enable ECH
-support, e.g., as normal part of Web browser functionality, with keys supplied
-by shared hosting providers, the presence of ECH extensions becomes less unusual
-and part of typical client behavior. In other words, if all Web browsers start
-using ECH, the presence of this value will not signal unusual behavior to
-passive eavesdroppers.
+As a means of reducing the impact of network ossification, {{?RFC8744}}
+recommends SNI-protection mechanisms be designed in such a way that network
+operators do not handle connections in which the mechanism is used differently
+than other connections. To that end, ECH is designed to resemble a standard TLS
+handshake as much as possible. The most obvious difference is the extension
+itself: as long as middleboxes ignore it, as required by {{!RFC8446}}, the rest
+of the handshake is designed to look very much as usual. Still, non-compliance
+with established standards is a widespread issue, and it may hinder successful
+deployment of ECH.
+
+The GREASE ECH protocol described in {{grease-ech}} provides a low-risk way to
+evaluate the deployability of ECH on the Internet. It is designed to mimic the
+real ECH protocol ({{real-ech}}), but without actually changing the security
+properties of the handshake. The underlying theory is that if GREASE ECH is
+deployable without triggering differentiable behavior, and real ECH looks enough
+like GREASE ECH, then ECH should be deployable as well. Thus, our strategy for
+mitigating network ossification has two parts:
+1. Design a "cover" protocol (i.e., GREASE ECH) that meets some notion of
+   deployability.
+1. Design the "target" protocol (i.e., ECH) so that networks do not differentiate
+   between it and the cover protocol.
+
+This strategy is analogous to the methodology that lead to "Middlebox
+Compatibility Mode" for TLS 1.3 described in {{!RFC8446}}.
+
+In the first step, the deployability of GREASE ECH is established by deploying
+the protocol and measuring its impact. [[OPEN ISSUE: Run an experiment that
+compares the error rate of GREASE ECH connections with vanilla TLS 1.3.]]
+Viewing the network operator as the adversary for the moment, we model the
+requirements of the second step in terms of the strength of the adversary, as
+follows.
+
+Suppose we know some set of features of the TLS handshake that are known to
+trigger differentiable treatment by the network. This set might include the
+plaintext extensions offered by the client or server, plaintext alert messages,
+the number of round trips over the network, the length of each message, and so
+on. Let us call these the protocol's "observable features". Our goal is to
+design real ECH so that each execution of the protocol has the same observable
+features as if GREASE ECH were being executed instead. For example, if
+extensions are an observable feature, then regardless of whether they are
+running the target protocol or the cover protocol, the client and server should
+appear to negotiate the same set of extensions. That way the real protocol does
+not trigger differentiable treatment that would not have been triggered by the
+cover protocol.
+
+Informally, we will say that target protocol is "indifferentiable" from cover
+protocol if, when executed in the presence of the adversary, both protocols have
+the same set of observable features [[TODO: Decide whether to reference
+@cjpatton's paper on protocol indifferentiability. It doesn't envision this
+particular application, but the formal model definitely applies.]] The strength
+of this model depends on how rich the set of observable features is: it may
+include the transcript of the protocol's execution itself, yielding a very
+strong attacker; or it may be as coarse grained as the number of IP packets
+sent. The model's strength also depends on whether the attacker is passive or
+active (see {{goals}}); middleboxes have been known to exhibit active behavior,
+even without malicious intent [[TOOD: Add references]].
+
+Ensuring indifferentiability of ECH from GREASE ECH in a strong attack model is
+not feasible for all implementations. Thus, this specification aims to provide a
+baseline security level that most deployments can achieve easily, while
+providing implementations enough flexibility to achieve stronger security
+wherever possible. Minimally, real ECH is designed to be indifferentiable from
+GREASE ECH for passive adversaries with following capabilities:
+1. The attacker does not know the ECHConfigs used by the server.
+1. The attacker keeps per-connection state only. In particular, it does not
+   track endpoints across connections.
+1. Observable features include: the code points of extensions negotiated in the
+   clear, but not the payloads themselves; the length of messages; and the
+   values of plaintext alert messages.
+
+This leaves a variety of practical differentiators out-of-scope. For example:
+1. the value of the configuration identifier;
+1. the value of the outer SNI;
+1. the TLS version negotiated, which may depend on ECH acceptance;
+1. client authentication, which may depend on ECH acceptance; and
+1. HRR issuance, which may depend on ECH acceptance.
+
+These can be addressed with more sophisticated implementations, but some
+mitigations require coordination between the client and server.
 
 ### Maintain Forward Secrecy
 
